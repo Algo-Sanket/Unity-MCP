@@ -38,16 +38,23 @@ jobs:
 
       - name: Activate Unity Personal License
         run: |
-          # Create license directory inside container
+          # Create license file locally first
+          mkdir -p license
+          cat > license/Unity_v2022.x.ulf << 'EOF'
+          ${{ secrets.UNITY_LICENSE }}
+          EOF
+          
+          # Create directory inside container FIRST
           docker exec unity-editor mkdir -p /root/.local/share/unity3d/Unity
           
-          # Create license file directly in container
-          docker exec unity-editor bash -c 'cat > /root/.local/share/unity3d/Unity/Unity_v2022.x.ulf << "EOFMARKER"
-          ${{ secrets.UNITY_LICENSE }}
-          EOFMARKER'
+          # Now copy the license file
+          docker cp license/Unity_v2022.x.ulf unity-editor:/root/.local/share/unity3d/Unity/Unity_v2022.x.ulf
           
-          # Verify the license file was created
+          # Verify the license file exists in container
           docker exec unity-editor ls -lh /root/.local/share/unity3d/Unity/Unity_v2022.x.ulf
+          
+          # Cleanup local license file
+          rm -rf license
           
           echo "✓ Personal license activated successfully!"
 
