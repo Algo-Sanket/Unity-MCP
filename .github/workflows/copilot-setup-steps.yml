@@ -36,15 +36,17 @@ jobs:
       - name: Start container
         run: docker start unity-editor
 
-      # FIXED LICENSE STEP — full path with filename
+      # FIXED: Create dir inside container + copy license
       - name: Activate Unity Personal License
         run: |
           mkdir -p license
           cat > license/Unity_v2022.x.ulf << 'EOF'
           ${{ secrets.UNITY_LICENSE }}
           EOF
+          docker exec unity-editor mkdir -p /root/.local/share/unity3d/Unity
           docker cp license/Unity_v2022.x.ulf unity-editor:/root/.local/share/unity3d/Unity/Unity_v2022.x.ulf
           echo "Personal license copied successfully!"
+          rm -rf license  # Cleanup
 
       - name: Launch Unity forever
         run: |
