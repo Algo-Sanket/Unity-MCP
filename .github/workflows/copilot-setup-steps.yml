@@ -1,0 +1,64 @@
+name: "Copilot Setup Steps"
+on:
+  workflow_dispatch:
+  push:
+    paths: [ .github/workflows/copilot-setup-steps.yml ]
+  pull_request:
+    paths: [ .github/workflows/copilot-setup-steps.yml ]
+
+jobs:
+  copilot-setup-steps:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Clean old resources
+        run: |
+          docker rm -f unity-editor unity-mcp-server || true
+          docker network rm unity-mcp-network || true
+
+      - name: Create network
+        run: docker network create unity-mcp-network
+
+      - name: Create Unity container
+        run: |
+          docker create --name unity-editor \
+            --network unity-mcp-network \
+            -p 7777:7777 \
+            --shm-size=2g \
+            -v ${{ github.workspace }}/Unity-MCP-Plugin:/project \
+            unityci/editor:ubuntu-2022.3.61f1-base-3 \
+            tail -f /dev/null
+
+      - name: Start container
+        run: docker start unity-editor
+
+      - name: Activate Unity Personal License
+        run: |
+          cat > /tmp/Unity_v2022.x.ulf << 'EOF'
+          ${{ secrets.UNITY_LICENSE }}
+          EOF
+          docker cp /tmp/Unity_v2022.x.ulf unity-editor:/root/.local/share/unity3d/Unity/Unity_v2022.x.ulf
+
+      - name: Launch Unity forever
+        run: |
+          docker exec -d unity-editor bash -c "
+            nohup /opt/unity/Editor/Unity -projectPath /project -batchmode -nographics \
+              -executeMethod com.IvanMurzak.Unity.MCP.Editor.Startup.Init \
+              -logFile /project/Logs/unity.log > /dev/null 2>&1 &
+          "
+
+      - name: Wait & show logs
+        run: sleep 60 && docker logs unity-editor --tail 50
+
+      - name: Start MCP Server
+        run: |
+          docker run -d --name unity-mcp-server --network unity-mcp-network -p 8080:8080 \
+            -e UNITY_MCP_PORT=8080 -e UNITY_MCP_CLIENT_TRANSPORT=http \
+            ivanmurzakdev/unity-mcp-server:latest
+
+      - name: SUCCESS
+        run: docker ps
