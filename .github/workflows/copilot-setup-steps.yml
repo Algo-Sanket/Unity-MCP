@@ -36,17 +36,20 @@ jobs:
       - name: Start container
         run: docker start unity-editor
 
-      # FIXED: Create dir inside container + copy license
       - name: Activate Unity Personal License
         run: |
-          mkdir -p license
-          cat > license/Unity_v2022.x.ulf << 'EOF'
-          ${{ secrets.UNITY_LICENSE }}
-          EOF
+          # Create license directory inside container
           docker exec unity-editor mkdir -p /root/.local/share/unity3d/Unity
-          docker cp license/Unity_v2022.x.ulf unity-editor:/root/.local/share/unity3d/Unity/Unity_v2022.x.ulf
-          echo "Personal license copied successfully!"
-          rm -rf license  # Cleanup
+          
+          # Create license file directly in container
+          docker exec unity-editor bash -c 'cat > /root/.local/share/unity3d/Unity/Unity_v2022.x.ulf << "EOFMARKER"
+          ${{ secrets.UNITY_LICENSE }}
+          EOFMARKER'
+          
+          # Verify the license file was created
+          docker exec unity-editor ls -lh /root/.local/share/unity3d/Unity/Unity_v2022.x.ulf
+          
+          echo "✓ Personal license activated successfully!"
 
       - name: Launch Unity forever
         run: |
@@ -59,15 +62,28 @@ jobs:
               -logFile /project/Logs/unity.log \
               > /dev/null 2>&1 &
           "
+          echo "✓ Unity launched in background"
 
       - name: Wait & show logs
-        run: sleep 70 && docker logs unity-editor --tail 100
+        run: |
+          echo "Waiting 70 seconds for Unity to initialize..."
+          sleep 70
+          echo "=== Unity Container Logs ==="
+          docker logs unity-editor --tail 100
 
       - name: Start MCP Server
         run: |
-          docker run -d --name unity-mcp-server --network unity-mcp-network -p 8080:8080 \
-            -e UNITY_MCP_PORT=8080 -e UNITY_MCP_CLIENT_TRANSPORT=http \
+          docker run -d --name unity-mcp-server \
+            --network unity-mcp-network \
+            -p 8080:8080 \
+            -e UNITY_MCP_PORT=8080 \
+            -e UNITY_MCP_CLIENT_TRANSPORT=http \
             ivanmurzakdev/unity-mcp-server:latest
+          echo "✓ MCP Server started"
 
       - name: SUCCESS – containers stay alive!
-        run: docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Image}}"
+        run: |
+          echo "=== Running Containers ==="
+          docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Image}}"
+          echo ""
+          echo "✓ All containers are running successfully!"
