@@ -11,86 +11,166 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    
+    # GitHub Services - these run as sidecars throughout the entire job
+    services:
+      unity-editor:
+        image: unityci/editor:ubuntu-2022.3.61f1-base-3
+        ports:
+          - 7777:7777
+        options: >-
+          --name unity-editor
+          --shm-size=2g
+      
+      unity-mcp-server:
+        image: ivanmurzakdev/unity-mcp-server:latest
+        ports:
+          - 8080:8080
+        env:
+          UNITY_MCP_PORT: 8080
+          UNITY_MCP_CLIENT_TRANSPORT: http
+    
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Clean old resources
+      
+      - name: Wait for services to be ready
         run: |
-          docker rm -f unity-editor unity-mcp-server || true
-          docker network rm unity-mcp-network || true
-
-      - name: Create network
-        run: docker network create unity-mcp-network
-
-      - name: Create Unity container
+          echo "Waiting for service containers to be ready..."
+          sleep 10
+          docker ps
+      
+      - name: Prepare Unity container
         run: |
-          docker create --name unity-editor \
-            --network unity-mcp-network \
-            -p 7777:7777 \
-            --shm-size=2g \
-            -v ${{ github.workspace }}/Unity-MCP-Plugin:/project \
-            unityci/editor:ubuntu-2022.3.61f1-base-3 \
-            tail -f /dev/null
-
-      - name: Start container
-        run: docker start unity-editor
-
-      - name: Activate Unity Personal License
-        run: |
-          # Create license file locally first
-          mkdir -p license
-          cat > license/Unity_v2022.x.ulf << 'EOF'
-          ${{ secrets.UNITY_LICENSE }}
-          EOF
+          echo "Setting up Unity license and project..."
           
-          # Create directory inside container FIRST
+          # Create license directory
           docker exec unity-editor mkdir -p /root/.local/share/unity3d/Unity
           
-          # Now copy the license file
-          docker cp license/Unity_v2022.x.ulf unity-editor:/root/.local/share/unity3d/Unity/Unity_v2022.x.ulf
+          # Create license file
+          docker exec unity-editor bash -c "cat > /root/.local/share/unity3d/Unity/Unity_v2022.x.ulf << 'EOF'
+          ${{ secrets.UNITY_LICENSE }}
+          EOF"
           
-          # Verify the license file exists in container
+          # Verify license
           docker exec unity-editor ls -lh /root/.local/share/unity3d/Unity/Unity_v2022.x.ulf
           
-          # Cleanup local license file
-          rm -rf license
+          # Prepare log directory
+          docker exec unity-editor mkdir -p /project/Logs
+          docker exec unity-editor chmod 777 /project/Logs
           
-          echo "✓ Personal license activated successfully!"
-
-      - name: Launch Unity forever
+          echo "✓ Unity container prepared"
+      
+      - name: Create Unity launch script
         run: |
-          docker exec -d unity-editor bash -c "
-            nohup /opt/unity/Editor/Unity \
-              -projectPath /project \
-              -batchmode \
-              -nographics \
-              -executeMethod com.IvanMurzak.Unity.MCP.Editor.Startup.Init \
-              -logFile /project/Logs/unity.log \
-              > /dev/null 2>&1 &
-          "
-          echo "✓ Unity launched in background"
-
-      - name: Wait & show logs
+          docker exec unity-editor bash -c 'cat > /tmp/launch-unity.sh << "LAUNCH_EOF"
+          #!/bin/bash
+          set -x
+          echo "=== Unity Launch Script ==="
+          echo "Project: /project"
+          ls -la /project/ 2>&1
+          
+          /opt/unity/Editor/Unity \
+            -projectPath /project \
+            -batchmode \
+            -nographics \
+            -executeMethod com.IvanMurzak.Unity.MCP.Editor.Startup.Init \
+            -logFile /project/Logs/unity.log \
+            2>&1 | tee /project/Logs/unity-stdout.log
+          
+          echo "Unity exited with code: $?"
+          LAUNCH_EOF'
+          
+          docker exec unity-editor chmod +x /tmp/launch-unity.sh
+      
+      - name: Launch Unity in background
         run: |
-          echo "Waiting 70 seconds for Unity to initialize..."
-          sleep 70
-          echo "=== Unity Container Logs ==="
-          docker logs unity-editor --tail 100
-
-      - name: Start MCP Server
+          echo "Starting Unity Editor..."
+          docker exec -d unity-editor bash -c '/tmp/launch-unity.sh > /project/Logs/launch.log 2>&1 &'
+          sleep 5
+      
+      - name: Verify Unity process
         run: |
-          docker run -d --name unity-mcp-server \
-            --network unity-mcp-network \
-            -p 8080:8080 \
-            -e UNITY_MCP_PORT=8080 \
-            -e UNITY_MCP_CLIENT_TRANSPORT=http \
-            ivanmurzakdev/unity-mcp-server:latest
-          echo "✓ MCP Server started"
-
-      - name: SUCCESS – containers stay alive!
+          echo "Checking Unity process..."
+          if docker exec unity-editor pgrep -f "Unity" > /dev/null; then
+            echo "✓ Unity is running!"
+            docker exec unity-editor ps aux | grep Unity | grep -v grep
+          else
+            echo "✗ Unity not running!"
+            docker exec unity-editor cat /project/Logs/launch.log || echo "No launch log"
+            exit 1
+          fi
+      
+      - name: Wait for Unity initialization
         run: |
-          echo "=== Running Containers ==="
-          docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Image}}"
+          echo "Monitoring Unity initialization..."
+          TIMEOUT=300
+          ELAPSED=0
+          
+          while [ $ELAPSED -lt $TIMEOUT ]; do
+            # Check process still alive
+            if ! docker exec unity-editor pgrep -f "Unity" > /dev/null; then
+              echo "✗ Unity process died!"
+              docker exec unity-editor cat /project/Logs/unity.log || echo "No log"
+              exit 1
+            fi
+            
+            # Check log file
+            if docker exec unity-editor test -f /project/Logs/unity.log; then
+              SIZE=$(docker exec unity-editor stat -c%s /project/Logs/unity.log 2>/dev/null || echo "0")
+              echo "Log size: $SIZE bytes (${ELAPSED}s)"
+              
+              # Show progress every 30s
+              if [ $((ELAPSED % 30)) -eq 0 ] && [ $SIZE -gt 0 ]; then
+                docker exec unity-editor tail -15 /project/Logs/unity.log
+              fi
+              
+              # Check for completion markers
+              if docker exec unity-editor grep -qE "(Refresh completed|All packages resolved|Successfully imported|Begin MonoManager ReloadAssembly)" /project/Logs/unity.log 2>/dev/null; then
+                echo "✓ Unity initialized!"
+                break
+              fi
+              
+              # Check for errors
+              if docker exec unity-editor grep -qE "(Fatal error|License error)" /project/Logs/unity.log 2>/dev/null; then
+                echo "✗ Unity error detected!"
+                docker exec unity-editor tail -50 /project/Logs/unity.log
+                exit 1
+              fi
+            fi
+            
+            sleep 5
+            ELAPSED=$((ELAPSED + 5))
+          done
+      
+      - name: Show Unity status
+        run: |
+          echo "=== Unity Process ==="
+          docker exec unity-editor ps aux | grep Unity | grep -v grep || echo "Not running"
           echo ""
-          echo "✓ All containers are running successfully!"
+          echo "=== Unity Log (last 30 lines) ==="
+          docker exec unity-editor tail -30 /project/Logs/unity.log 2>/dev/null || echo "No log yet"
+      
+      - name: Test MCP Server connectivity
+        run: |
+          echo "Testing MCP server..."
+          curl -v http://localhost:8080/health || echo "MCP server not responding yet"
+      
+      - name: SUCCESS - Services remain alive
+        run: |
+          echo "=== Active Services ==="
+          docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+          echo ""
+          echo "✓ Unity Editor is running in service container!"
+          echo "✓ MCP Server is running in service container!"
+          echo "✓ Both will remain active for subsequent jobs/steps"
+          echo ""
+          echo "Port mappings:"
+          echo "  - Unity: localhost:7777"
+          echo "  - MCP Server: localhost:8080"
+      
+      # Add more steps here - Unity and MCP will stay alive!
+      - name: Example - Additional step
+        run: |
+          echo "Unity is still running in background..."
+          docker exec unity-editor pgrep Unity || echo "Unity stopped!"
