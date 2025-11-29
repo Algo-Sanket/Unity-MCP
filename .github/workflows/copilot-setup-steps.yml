@@ -45,19 +45,40 @@ jobs:
           # Create license directory
           docker exec unity-editor mkdir -p /root/.local/share/unity3d/Unity
           
-          # Write license file from GitHub secret
-          docker exec unity-editor bash -c 'cat > /root/.local/share/unity3d/Unity/Unity_v2022.x.ulf << '"'"'LICENSEEOF'"'"'
-          ${{ secrets.UNITY_LICENSE }}
-          LICENSEEOF'
-          
-          # Verify license file was created
-          if docker exec unity-editor test -f /root/.local/share/unity3d/Unity/Unity_v2022.x.ulf; then
-            echo "✓ License file created successfully"
-            docker exec unity-editor ls -lh /root/.local/share/unity3d/Unity/Unity_v2022.x.ulf
-          else
-            echo "✗ Failed to create license file!"
+          # Check if license secret is set
+          if [ -z "${{ secrets.UNITY_LICENSE }}" ]; then
+            echo "✗ UNITY_LICENSE secret is not set!"
             exit 1
           fi
+          
+          # Create license file on the host first
+          cat > Unity_lic.ulf << 'LICENSE_EOF'
+          ${{ secrets.UNITY_LICENSE }}
+          LICENSE_EOF
+          
+          # Verify the license file is valid XML
+          if ! head -1 Unity_lic.ulf | grep -q "<?xml"; then
+            echo "✗ License file doesn't start with XML declaration!"
+            echo "First line: $(head -1 Unity_lic.ulf)"
+            exit 1
+          fi
+          
+          # Copy to container with all possible names Unity might look for
+          docker cp Unity_lic.ulf unity-editor:/root/.local/share/unity3d/Unity/Unity_lic.ulf
+          docker cp Unity_lic.ulf unity-editor:/root/.local/share/unity3d/Unity/Unity_v2022.x.ulf
+          docker cp Unity_lic.ulf unity-editor:/root/.local/share/unity3d/Unity/Unity_v6000.x.ulf
+          
+          # Clean up host file
+          rm Unity_lic.ulf
+          
+          # Verify license files in container
+          echo "✓ License files created:"
+          docker exec unity-editor ls -lh /root/.local/share/unity3d/Unity/
+          
+          # Show first few lines to verify it's valid XML
+          echo ""
+          echo "License file preview (first 5 lines):"
+          docker exec unity-editor head -5 /root/.local/share/unity3d/Unity/Unity_lic.ulf
       
       - name: Copy project to container
         run: |
