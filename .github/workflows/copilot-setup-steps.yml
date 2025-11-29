@@ -83,34 +83,38 @@ jobs:
           docker exec unity-editor mkdir -p /project/Logs
           docker exec unity-editor chmod 777 /project/Logs
           
-          # Create launch script
-          docker exec unity-editor bash -c 'cat > /tmp/launch-unity.sh << '\''LAUNCH_SCRIPT'\''
-#!/bin/bash
-set -x
-echo "=== Unity Launch Script ==="
-echo "Timestamp: $(date)"
-echo "Project path: /project"
-echo "License file:"
-ls -lh /root/.local/share/unity3d/Unity/*.ulf 2>&1
-
-echo "Project contents:"
-ls -la /project/ 2>&1
-
-echo "Starting Unity Editor..."
-/opt/unity/Editor/Unity \
-  -projectPath /project \
-  -batchmode \
-  -nographics \
-  -executeMethod com.IvanMurzak.Unity.MCP.Editor.Startup.Init \
-  -logFile /project/Logs/unity.log \
-  2>&1 | tee /project/Logs/unity-stdout.log
-
-EXIT_CODE=$?
-echo "Unity exited with code: $EXIT_CODE"
-exit $EXIT_CODE
-LAUNCH_SCRIPT'
+          # Create launch script using a different approach
+          cat > launch-unity.sh << 'SCRIPT_END'
+          #!/bin/bash
+          set -x
+          echo "=== Unity Launch Script ==="
+          echo "Timestamp: $(date)"
+          echo "Project path: /project"
+          echo "License file:"
+          ls -lh /root/.local/share/unity3d/Unity/*.ulf 2>&1
           
+          echo "Project contents:"
+          ls -la /project/ 2>&1
+          
+          echo "Starting Unity Editor..."
+          /opt/unity/Editor/Unity \
+            -projectPath /project \
+            -batchmode \
+            -nographics \
+            -executeMethod com.IvanMurzak.Unity.MCP.Editor.Startup.Init \
+            -logFile /project/Logs/unity.log \
+            2>&1 | tee /project/Logs/unity-stdout.log
+          
+          EXIT_CODE=$?
+          echo "Unity exited with code: $EXIT_CODE"
+          exit $EXIT_CODE
+          SCRIPT_END
+          
+          # Copy script to container
+          docker cp launch-unity.sh unity-editor:/tmp/launch-unity.sh
           docker exec unity-editor chmod +x /tmp/launch-unity.sh
+          rm launch-unity.sh
+          
           echo "✓ Unity environment prepared"
       
       - name: Launch Unity Editor
