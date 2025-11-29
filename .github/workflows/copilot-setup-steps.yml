@@ -84,7 +84,7 @@ jobs:
           docker exec unity-editor chmod 777 /project/Logs
           
           # Create launch script
-          docker exec unity-editor bash -c 'cat > /tmp/launch-unity.sh << "EOF"
+          docker exec unity-editor bash -c 'cat > /tmp/launch-unity.sh << '\''LAUNCH_SCRIPT'\''
 #!/bin/bash
 set -x
 echo "=== Unity Launch Script ==="
@@ -108,7 +108,7 @@ echo "Starting Unity Editor..."
 EXIT_CODE=$?
 echo "Unity exited with code: $EXIT_CODE"
 exit $EXIT_CODE
-EOF'
+LAUNCH_SCRIPT'
           
           docker exec unity-editor chmod +x /tmp/launch-unity.sh
           echo "✓ Unity environment prepared"
