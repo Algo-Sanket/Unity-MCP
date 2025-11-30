@@ -1,99 +1,156 @@
-name: Unity + MCP Copilot (Fixed & Working 2025)
+name: Copilot + Unity MCP + Tests
 
 on:
   workflow_dispatch:
   push:
-    paths: [ ".github/workflows/unity-mcp.yml" ]
+    branches: [ main, master ]
   pull_request:
 
-# Only one job can hold the Personal license
-concurrency:
-  group: unity-mcp-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
-  run-mcp:
+  unity-copilot-and-tests:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write          # needed for test results
+      actions: read          # optional, for artifacts
+
     steps:
-      - name: Checkout code
+      # ────────────────────────────── Checkout ──────────────────────────────
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           lfs: true
 
-      - name: Activate Unity Personal License
-        uses: game-ci/unity-actf-licensing@v2
+      # ─────────────────────── Free disk space (important) ───────────────────────
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc "/usr/local/share/boost" "$AGENT_TOOLSDIRECTORY" || true
+
+      # ─────────────────────── Validate Unity credentials ───────────────────────
+      - name: Validate Unity credentials
         env:
           UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
           UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
-
-      - name: Start MCP Server + Unity Editor
         run: |
-          docker network create mcp-net || true
-
-          docker run -d \
-            --name mcp-server \
-            --network mcp-net \
-            -p 8080:8080 \
-            ivanmurzakdev/unity-mcp-server:latest
-
-          docker run -d \
-            --name unity-editor \
-            --network mcp-net \
-            -p 7777:7777 \
-            -v "$(pwd)/Unity-MCP-Plugin:/project" \
-            --shm-size=2g \
-            unityci/editor:ubuntu-2022.3.61f1-base-3 \
-            /opt/unity/Editor/Unity \
-              -batchmode \
-              -nographics \
-              -projectPath /project \
-              -executeMethod com.IvanMurzak.Unity.MCP.Editor.Startup.Init \
-              -logFile /dev/stdout
-
-      - name: Wait for MCP Server (correct endpoint)
-        run: |
-          echo "Waiting for MCP Server..."
-          for i in {1..60}; do
-            if curl -f http://localhost:8080/api/health >/dev/null 2>&1; then
-              echo "MCP Server is READY!"
-              curl http://localhost:8080/api/health
-              break
-            fi
-            echo "Attempt $i/60 ..."
-            sleep 5
-          done
-
-          if ! curl -f http://localhost:8080/api/health >/dev/null 2>&1; then
-            echo "MCP Server failed to start"
-            docker logs mcp-server
+          if [[ -z "$UNITY_EMAIL" || -z "$UNITY_PASSWORD" ]]; then
+            echo "ERROR: Add UNITY_EMAIL and UNITY_PASSWORD secrets!"
             exit 1
           fi
+          echo "Unity account ready"
 
-      - name: Environment Ready!
+      # ─────────────────────── Create working docker-compose.yml ───────────────────────
+      - name: Create docker-compose.yml
+        env:
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
         run: |
-          echo "UNITY + MCP IS FULLY RUNNING!"
-          echo "MCP API → http://localhost:8080"
-          echo "Unity port → 7777"
-          docker ps
+          cat > docker-compose.yml << EOF
+          services:
+            unity-mcp-server:
+              image: ivanmurzakdev/unity-mcp-server:latest
+              container_name: unity-mcp-server
+              ports:
+                - "8080:8080"
+              environment:
+                UNITY_MCP_PORT: 8080
+                UNITY_MCP_CLIENT_TRANSPORT: http
+                UNITY_EMAIL: ${UNITY_EMAIL}
+                UNITY_PASSWORD: ${UNITY_PASSWORD}
+              healthcheck:
+                test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+                interval: 8s
+                timeout: 5s
+                retries: 50
+                start_period: 10s
+              restart: unless-stopped
 
-      - name: Test MCP Command
-        run: >
-          curl -X POST http://localhost:8080/api/execute
-          -H "Content-Type: application/json"
-          -d '{"code":"Debug.Log(\"Hello from GitHub Actions!\")"}'
+            unity-editor:
+              image: unityci/editor:ubuntu-6000.0.12f1-base-3
+              container_name: unity-editor
+              ports:
+                - "7777:7777"
+              shm_size: 4g
+              environment:
+                UNITY_EMAIL: ${UNITY_EMAIL}
+                UNITY_PASSWORD: ${UNITY_PASSWORD}
+              volumes:
+                - ./Unity-MCP-Plugin:/project
+                - unity-logs:/project/Logs
+              entrypoint: ["/bin/bash", "-c"]
+              command: |
+                set -e
+                /opt/unity/Editor/Unity -batchmode -nographics -quit -returnlicense || true
+                /opt/unity/Editor/Unity \\
+                  -batchmode -nographics -quit \\
+                  -username "\${UNITY_EMAIL}" \\
+                  -password "\${UNITY_PASSWORD}" \\
+                  -logFile /tmp/license.log
+                mkdir -p /project/{Assets,ProjectSettings,Logs}
+                chmod 777 /project/Logs
+                exec /opt/unity/Editor/Unity \\
+                  -projectPath /project \\
+                  -batchmode -nographics \\
+                  -executeMethod com.IvanMurzak.Unity.MCP.Editor.Startup.Init \\
+                  -logFile /project/Logs/unity.log
 
-      - name: Return License & Full Cleanup
-        if: always()
-        uses: game-ci/unity-actf-licensing@v2
+          volumes:
+            unity-logs:
+          EOF
+
+      # ─────────────────────── Start Copilot + Unity Environment ───────────────────────
+      - name: Start Unity + MCP Server
+        run: |
+          docker compose up -d
+          docker compose ps
+
+      - name: Wait for MCP Server
+        run: |
+          for i in {1..60}; do
+            if curl -f http://localhost:8080/health >/dev/null 2>&1; then
+              echo "MCP Server is healthy!"
+              break
+            fi
+            sleep 5
+          done
+          curl -f http://localhost:8080/health || (docker compose logs unity-mcp-server && exit 1)
+
+      - name: Wait for Unity Editor
+        run: |
+          for i in {1..80}; do
+            if docker exec unity-editor pgrep -f Unity >/dev/null 2>&1; then
+              echo "Unity Editor is running!"
+              break
+            fi
+            sleep 6
+          done
+
+      - name: Success – Copilot Environment Ready
+        run: |
+          echo "COPILOT + UNITY IS READY — http://localhost:8080"
+
+      # ─────────────────────── Run Unity Tests (Personal License – 2025 method) ───────────────────────
+      - name: Run Unity Tests
+        uses: game-ci/unity-test-runner@v4
         env:
           UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
           UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
         with:
-          returnLicense: true
+          projectPath: Unity-MCP-Plugin
+          unityVersion: 6000.0.12f1
+          checkName: "Unity Test Results"
+          githubToken: ${{ secrets.GITHUB_TOKEN }}   # needed to upload results
 
-      - name: Stop containers and network
+      # ─────────────────────── Optional: Test MCP endpoint (proof it works) ───────────────────────
+      - name: Test MCP Connection
+        run: |
+          curl -X POST http://localhost:8080/v1/messages \
+            -H "Content-Type: application/json" \
+            -d '{"messages":[{"role":"user","content":"Hello from GitHub Actions test run!"}]}' \
+            -s | jq .
+
+      # ─────────────────────── Cleanup ───────────────────────
+      - name: Cleanup
         if: always()
         run: |
-          docker rm -f mcp-server unity-editor || true
-          docker network rm mcp-net || true
-          echo "Cleanup done"
+          docker compose down -v || true
+          echo "All cleaned up"
