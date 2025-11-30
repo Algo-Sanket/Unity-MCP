@@ -16,6 +16,17 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
       
+      - name: Install Docker Compose
+        run: |
+          # GitHub runners have docker-compose v1, but we need v2 syntax
+          # Install docker compose plugin (v2)
+          sudo apt-get update
+          sudo apt-get install -y docker-compose-plugin
+          
+          # Verify installation
+          docker compose version
+          echo "✓ Docker Compose installed"
+      
       - name: Create docker-compose.yml
         run: |
           cat > docker-compose.yml << 'EOF'
@@ -61,73 +72,103 @@ jobs:
                   # Create license directory
                   mkdir -p /root/.local/share/unity3d/Unity
                   
-                  # Activate Unity license
+                  # Activate Unity license with proper parameters
                   echo "Activating Unity license..."
                   /opt/unity/Editor/Unity \
-                    -quit \
                     -batchmode \
                     -nographics \
-                    -username "$${UNITY_EMAIL}" \
-                    -password "$${UNITY_PASSWORD}" \
-                    -logFile /tmp/activation.log || true
+                    -quit \
+                    -logFile /tmp/activation.log \
+                    -username "${UNITY_EMAIL}" \
+                    -password "${UNITY_PASSWORD}" || true
                   
-                  sleep 5
+                  # Wait longer for activation to complete
+                  echo "Waiting for license activation..."
+                  sleep 10
                   
-                  # Check license activation
+                  # Check license activation with better logging
                   if [ -f /root/.local/share/unity3d/Unity/Unity_lic.ulf ]; then
                     echo "✓ License activated successfully!"
+                    echo "License file info:"
+                    ls -lh /root/.local/share/unity3d/Unity/Unity_lic.ulf
                   else
                     echo "✗ License activation failed!"
+                    echo ""
+                    echo "=== Activation Log ==="
                     cat /tmp/activation.log 2>/dev/null || echo "No activation log"
-                    exit 1
+                    echo ""
+                    echo "=== License Directory Contents ==="
+                    ls -la /root/.local/share/unity3d/Unity/ 2>/dev/null || echo "Directory doesn't exist"
+                    echo ""
+                    echo "Attempting to continue anyway - Unity might activate on first run..."
                   fi
                   
                   # Wait for project files
                   echo "Waiting for project files..."
                   TIMEOUT=60
                   ELAPSED=0
-                  while [ ! -d /project/Assets ] && [ $$ELAPSED -lt $$TIMEOUT ]; do
-                    echo "Waiting... ($$ELAPSED/$$TIMEOUT)"
+                  while [ ! -d /project/Assets ] && [ $ELAPSED -lt $TIMEOUT ]; do
+                    echo "Waiting... ($ELAPSED/$TIMEOUT)"
                     sleep 2
-                    ELAPSED=$$((ELAPSED + 2))
+                    ELAPSED=$((ELAPSED + 2))
                   done
                   
                   if [ ! -d /project/Assets ]; then
-                    echo "⚠ Project Assets not found, continuing anyway..."
+                    echo "⚠ Project Assets not found, creating minimal project structure..."
+                    mkdir -p /project/Assets /project/ProjectSettings
                   fi
                   
                   # Create logs directory
                   mkdir -p /project/Logs
                   chmod 777 /project/Logs
                   
-                  # Start Unity Editor in background
+                  # Start Unity Editor - this will also attempt activation if needed
                   echo "Starting Unity Editor..."
                   /opt/unity/Editor/Unity \
                     -projectPath /project \
                     -batchmode \
                     -nographics \
+                    -username "${UNITY_EMAIL}" \
+                    -password "${UNITY_PASSWORD}" \
                     -executeMethod com.IvanMurzak.Unity.MCP.Editor.Startup.Init \
                     -logFile /project/Logs/unity.log \
                     2>&1 | tee /project/Logs/unity-stdout.log &
                   
-                  UNITY_PID=$$!
-                  echo "Unity started with PID: $$UNITY_PID"
-                  echo $$UNITY_PID > /tmp/unity.pid
+                  UNITY_PID=$!
+                  echo "Unity started with PID: $UNITY_PID"
+                  echo $UNITY_PID > /tmp/unity.pid
                   
                   # Keep container alive and monitor Unity
                   echo "Container staying alive, monitoring Unity..."
                   while true; do
-                    if ! kill -0 $$UNITY_PID 2>/dev/null; then
-                      echo "⚠ Unity process died, restarting..."
+                    if ! kill -0 $UNITY_PID 2>/dev/null; then
+                      echo "⚠ Unity process died, checking logs..."
+                      
+                      # Check if it was a license issue
+                      if grep -qi "license" /project/Logs/unity.log 2>/dev/null; then
+                        echo "License issue detected, attempting reactivation..."
+                        /opt/unity/Editor/Unity \
+                          -batchmode \
+                          -nographics \
+                          -quit \
+                          -username "${UNITY_EMAIL}" \
+                          -password "${UNITY_PASSWORD}" \
+                          -logFile /tmp/reactivation.log || true
+                        sleep 5
+                      fi
+                      
+                      echo "Restarting Unity..."
                       /opt/unity/Editor/Unity \
                         -projectPath /project \
                         -batchmode \
                         -nographics \
+                        -username "${UNITY_EMAIL}" \
+                        -password "${UNITY_PASSWORD}" \
                         -executeMethod com.IvanMurzak.Unity.MCP.Editor.Startup.Init \
                         -logFile /project/Logs/unity.log \
                         2>&1 | tee /project/Logs/unity-stdout.log &
-                      UNITY_PID=$$!
-                      echo $$UNITY_PID > /tmp/unity.pid
+                      UNITY_PID=$!
+                      echo $UNITY_PID > /tmp/unity.pid
                     fi
                     sleep 30
                   done
@@ -166,21 +207,24 @@ jobs:
           UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
           UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
         run: |
-          echo "Starting services with docker-compose..."
+          echo "Starting services with docker compose..."
           
           # Check credentials
           if [ -z "$UNITY_EMAIL" ] || [ -z "$UNITY_PASSWORD" ]; then
             echo "✗ UNITY_EMAIL or UNITY_PASSWORD not set!"
-            echo "Please add these secrets in repository settings."
+            echo "Please add these secrets in repository settings:"
+            echo "  1. Go to Settings → Secrets and variables → Actions"
+            echo "  2. Add UNITY_EMAIL with your Unity account email"
+            echo "  3. Add UNITY_PASSWORD with your Unity account password"
             exit 1
           fi
           
-          # Start services in detached mode
-          docker-compose up -d
+          # Start services in detached mode (use 'docker compose' not 'docker-compose')
+          docker compose up -d
           
           echo "✓ Services started"
           echo ""
-          docker-compose ps
+          docker compose ps
       
       - name: Wait for MCP Server
         run: |
@@ -257,7 +301,7 @@ jobs:
         run: |
           echo "=== Service Status ==="
           echo ""
-          docker-compose ps
+          docker compose ps
           echo ""
           
           echo "=== MCP Server Health ==="
@@ -270,7 +314,7 @@ jobs:
             docker exec unity-editor ps aux | grep Unity | grep -v grep
           else
             echo "✗ Unity: NOT RUNNING"
-            docker-compose logs unity-editor | tail -50
+            docker compose logs unity-editor | tail -50
           fi
           
           echo ""
@@ -301,7 +345,7 @@ jobs:
           echo "Containers will stay alive for all remaining steps!"
           echo "GitHub Copilot can now interact with Unity via MCP."
           echo ""
-          docker-compose ps
+          docker compose ps
       
       # ============================================
       # ADD YOUR COPILOT STEPS BELOW
@@ -334,5 +378,5 @@ jobs:
         if: always()
         run: |
           echo "Shutting down services..."
-          docker-compose down -v
+          docker compose down -v
           echo "✓ Cleanup complete"
