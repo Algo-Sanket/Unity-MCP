@@ -1,14 +1,14 @@
-name: "Copilot Setup Steps"
+name: Copilot + Unity MCP Setup
 
 on:
   workflow_dispatch:
   push:
-    paths: [ .github/workflows/copilot-setup-steps.yml ]
+    paths: [.github/workflows/copilot-setup-steps.yml]
   pull_request:
-    paths: [ .github/workflows/copilot-setup-steps.yml ]
+    paths: [.github/workflows/copilot-setup-steps.yml]
 
 jobs:
-  copilot-setup-steps:
+  unity-mcp:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -17,18 +17,28 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Free up disk space (optional but recommended)
+      - name: Free disk space
         run: |
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /opt/ghc
-          sudo rm -rf "/usr/local/share/boost"
-          echo "Disk space freed"
+          sudo rm -rf /usr/share/dotnet /opt/ghc "/usr/local/share/boost" "$AGENT_TOOLSDIRECTORY" || true
+
+      - name: Validate Unity credentials
+        env:
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+        run: |
+          if [[ -z "$UNITY_EMAIL" || -z "$UNITY_PASSWORD" ]]; then
+            echo "ERROR: Missing UNITY_EMAIL or UNITY_PASSWORD secrets!"
+            echo "Add them in: Settings → Secrets and variables → Actions"
+            exit 1
+          fi
+          echo "Unity credentials validated"
 
       - name: Create docker-compose.yml
+        env:
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
         run: |
-          cat > docker-compose.yml << 'EOF'
-          version: '3.8'
-
+          cat > docker-compose.yml << EOF
           services:
             unity-mcp-server:
               image: ivanmurzakdev/unity-mcp-server:latest
@@ -38,165 +48,128 @@ jobs:
               environment:
                 UNITY_MCP_PORT: 8080
                 UNITY_MCP_CLIENT_TRANSPORT: http
+                UNITY_EMAIL: ${UNITY_EMAIL}
+                UNITY_PASSWORD: ${UNITY_PASSWORD}
               networks:
-                - unity-network
+                - unity-net
               healthcheck:
                 test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
-                interval: 10s
+                interval: 8s
                 timeout: 5s
-                retries: 10
+                retries: 40
                 start_period: 10s
+              restart: unless-stopped
 
             unity-editor:
-              image: unityci/editor:ubuntu-6000.0.12f1-base-3   # 2024 LTS – no serial bugs!
+              image: unityci/editor:ubuntu-6000.0.12f1-base-3
               container_name: unity-editor
               ports:
                 - "7777:7777"
               shm_size: 4g
-              networks:
-                - unity-network
-              volumes:
-                - ./Unity-MCP-Plugin:/project
-                - unity-logs:/project/Logs
               environment:
                 UNITY_EMAIL: ${UNITY_EMAIL}
                 UNITY_PASSWORD: ${UNITY_PASSWORD}
+              volumes:
+                - ./Unity-MCP-Plugin:/project
+                - unity-logs:/project/Logs
+              networks:
+                - unity-net
               entrypoint: ["/bin/bash", "-c"]
-              command:
-                - |
-                  set -e
+              command: |
+                set -e
+                echo "Returning old license..."
+                /opt/unity/Editor/Unity -batchmode -nographics -quit -returnlicense || true
 
-                  echo "=== Unity Personal License Activation (2025 method) ==="
+                echo "Activating Personal license via login..."
+                /opt/unity/Editor/Unity \\
+                  -batchmode -nographics -quit \\
+                  -username "\${UNITY_EMAIL}" \\
+                  -password "\${UNITY_PASSWORD}" \\
+                  -logFile /tmp/license.log
 
-                  # Step 1: Return any old license
-                  echo "Returning any existing license..."
-                  /opt/unity/Editor/Unity -batchmode -nographics -quit -returnlicense -logFile /tmp/return.log || true
+                mkdir -p /project/{Assets,ProjectSettings,Logs}
+                chmod 777 /project/Logs
 
-                  # Step 2: Login → Unity auto-grants Personal license (this is the magic)
-                  echo "Logging in and activating Personal license..."
-                  /opt/unity/Editor/Unity \
-                    -batchmode \
-                    -nographics \
-                    -quit \
-                    -username "${UNITY_EMAIL}" \
-                    -password "${UNITY_PASSWORD}" \
-                    -logFile /tmp/license.log
-
-                  echo "Personal license activated!"
-
-                  # Step 3: Ensure project & logs exist
-                  mkdir -p /project/{Assets,ProjectSettings,Logs}
-                  chmod 777 /project/Logs
-
-                  # Step 4: Start Unity with MCP plugin
-                  echo "Starting Unity Editor with MCP server on port 7777..."
-                  exec /opt/unity/Editor/Unity \
-                    -projectPath /project \
-                    -batchmode \
-                    -nographics \
-                    -executeMethod com.IvanMurzak.Unity.MCP.Editor.Startup.Init \
-                    -logFile /project/Logs/unity.log
-
-              healthcheck:
-                test: ["CMD", "pgrep", "-f", "Unity"]
-                interval: 15s
-                timeout: 10s
-                retries: 5
-                start_period: 120s
+                echo "Starting Unity with MCP plugin..."
+                exec /opt/unity/Editor/Unity \\
+                  -projectPath /project \\
+                  -batchmode \\
+                  -nographics \\
+                  -executeMethod com.IvanMurzak.Unity.MCP.Editor.Startup.Init \\
+                  -logFile /project/Logs/unity.log
 
           volumes:
             unity-logs:
 
           networks:
-            unity-network:
+            unity-net:
               driver: bridge
           EOF
+          echo "docker-compose.yml created"
 
-          echo "docker-compose.yml created successfully"
-
-      - name: Validate Unity credentials
-        env:
-          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
-          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
-        run: |
-          if [[ -z "$UNITY_EMAIL" || -z "$UNITY_PASSWORD" ]]; then
-            echo "ERROR: UNITY_EMAIL or UNITY_PASSWORD secrets missing!"
-            echo "   → Go to repo Settings → Secrets and variables → Actions"
-            echo "   → Add UNITY_EMAIL and UNITY_PASSWORD"
-            exit 1
-          fi
-          echo "Unity credentials are present"
-
-      - name: Start services
-        env:
-          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
-          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+      - name: Start containers
         run: |
           docker compose up -d
-          echo "Services started"
           docker compose ps
 
-      - name: Wait for MCP Server (port 8080)
+      - name: Wait for MCP Server (robust)
         run: |
           echo "Waiting for MCP Server to be healthy..."
-          for i in {1..30}; do
+          for i in {1..60}; do
             if curl -f http://localhost:8080/health >/dev/null 2>&1; then
-              echo "MCP Server is ready!"
+              echo "MCP Server is READY!"
+              curl http://localhost:8080/health
               break
             fi
-            echo "Attempt $i/30..."
+            echo "Attempt $i/60... sleeping 5s"
             sleep 5
           done
-          curl http://localhost:8080/health || (docker compose logs unity-mcp-server && exit 1)
 
-      - name: Wait for Unity Editor to start
+          curl -f http://localhost:8080/health || {
+            echo "MCP Server failed!"
+            docker compose logs unity-mcp-server
+            exit 1
+          }
+
+      - name: Wait for Unity Editor
         run: |
-          echo "Waiting for Unity Editor process..."
-          timeout=300
-          elapsed=0
-          while [ $elapsed -lt $timeout ]; do
+          echo "Waiting for Unity process to start..."
+          for i in {1..70}; do
             if docker exec unity-editor pgrep -f Unity >/dev/null 2>&1; then
-              echo "Unity Editor is running!"
+              echo "Unity Editor is RUNNING!"
               break
             fi
-            sleep 5
-            elapsed=$((elapsed+5))
-            echo "Waiting... ($elapsed/$timeout)"
+            echo "Waiting... ($i/70)"
+            sleep 6
           done
 
-          echo "Final container status:"
           docker compose ps
 
-      - name: Final status & success message
+      - name: Environment Ready!
         run: |
           echo ""
-          echo "╔══════════════════════════════════════════╗"
-          echo "║       COPILOT + UNITY ENVIRONMENT READY!       ║"
+          echo "╔══════════════════════════════════════════════════╗"
+          echo "║      COPILOT + UNITY ENVIRONMENT IS READY!      ║"
           echo "║                                                  ║"
-          echo "║  Unity Editor → http://localhost:7777          ║"
-          echo "║  MCP Server   → http://localhost:8080          ║"
+          echo "║   Unity Editor : http://localhost:7777           ║"
+          echo "║   MCP Server   : http://localhost:8080            ║"
           echo "║                                                  ║"
-          echo "║  GitHub Copilot can now edit your Unity project ║"
-          echo "╚══════════════════════════════════════════╝"
+          echo "║   GitHub Copilot can now edit your project!     ║"
+          echo "╚══════════════════════════════════════════════════╝"
           echo ""
-          docker compose ps
 
-      # ——————————————————————————
-      # Add your Copilot steps below — Unity stays alive!
-      # ——————————————————————————
-
-      - name: Example – Test MCP connection
+      - name: Test MCP Connection
         run: |
           curl -X POST http://localhost:8080/v1/messages \
             -H "Content-Type: application/json" \
-            -d '{"messages":[{"role":"user","content":"Say hello from GitHub Actions!"}]}' \
+            -d '{"messages":[{"role":"user","content":"Hello from GitHub Actions – $(date)"}]}' \
             -s | jq .
 
-      # Add as many steps as you want here!
+      # Add all your Copilot automation steps here ↓
 
       - name: Cleanup
         if: always()
         run: |
-          echo "Shutting down containers..."
+          echo "Shutting down..."
           docker compose down -v || true
-          echo "Cleanup complete"
+          echo "Done!"
