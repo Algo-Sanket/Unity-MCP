@@ -16,16 +16,23 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
       
-      - name: Install Docker Compose
+      - name: Setup Docker Compose
         run: |
-          # GitHub runners have docker-compose v1, but we need v2 syntax
-          # Install docker compose plugin (v2)
-          sudo apt-get update
-          sudo apt-get install -y docker-compose-plugin
-          
-          # Verify installation
-          docker compose version
-          echo "✓ Docker Compose installed"
+          # Check if docker compose (v2) is available
+          if docker compose version &>/dev/null; then
+            echo "✓ Docker Compose v2 already available"
+            docker compose version
+          elif command -v docker-compose &>/dev/null; then
+            echo "✓ Docker Compose v1 found"
+            docker-compose version
+            echo "Creating alias for compatibility..."
+            # We'll use docker-compose v1 syntax throughout
+          else
+            echo "Installing Docker Compose..."
+            sudo curl -L "https://github.com/docker/compose/releases/download/v2.24.0/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+            sudo chmod +x /usr/local/bin/docker-compose
+            docker-compose version
+          fi
       
       - name: Create docker-compose.yml
         run: |
@@ -219,12 +226,21 @@ jobs:
             exit 1
           fi
           
-          # Start services in detached mode (use 'docker compose' not 'docker-compose')
-          docker compose up -d
+          # Determine which docker compose command to use
+          if docker compose version &>/dev/null; then
+            COMPOSE_CMD="docker compose"
+          else
+            COMPOSE_CMD="docker-compose"
+          fi
+          
+          echo "Using: $COMPOSE_CMD"
+          
+          # Start services in detached mode
+          $COMPOSE_CMD up -d
           
           echo "✓ Services started"
           echo ""
-          docker compose ps
+          $COMPOSE_CMD ps
       
       - name: Wait for MCP Server
         run: |
@@ -299,9 +315,16 @@ jobs:
       
       - name: Verify services are running
         run: |
+          # Determine which docker compose command to use
+          if docker compose version &>/dev/null; then
+            COMPOSE_CMD="docker compose"
+          else
+            COMPOSE_CMD="docker-compose"
+          fi
+          
           echo "=== Service Status ==="
           echo ""
-          docker compose ps
+          $COMPOSE_CMD ps
           echo ""
           
           echo "=== MCP Server Health ==="
@@ -314,7 +337,7 @@ jobs:
             docker exec unity-editor ps aux | grep Unity | grep -v grep
           else
             echo "✗ Unity: NOT RUNNING"
-            docker compose logs unity-editor | tail -50
+            $COMPOSE_CMD logs unity-editor | tail -50
           fi
           
           echo ""
@@ -333,6 +356,13 @@ jobs:
       
       - name: SUCCESS - Environment Ready!
         run: |
+          # Determine which docker compose command to use
+          if docker compose version &>/dev/null; then
+            COMPOSE_CMD="docker compose"
+          else
+            COMPOSE_CMD="docker-compose"
+          fi
+          
           echo ""
           echo "╔════════════════════════════════════════╗"
           echo "║    ✓ COPILOT ENVIRONMENT READY! ✓     ║"
@@ -345,7 +375,7 @@ jobs:
           echo "Containers will stay alive for all remaining steps!"
           echo "GitHub Copilot can now interact with Unity via MCP."
           echo ""
-          docker compose ps
+          $COMPOSE_CMD ps
       
       # ============================================
       # ADD YOUR COPILOT STEPS BELOW
@@ -377,6 +407,13 @@ jobs:
       - name: Cleanup (runs even if previous steps fail)
         if: always()
         run: |
+          # Determine which docker compose command to use
+          if docker compose version &>/dev/null; then
+            COMPOSE_CMD="docker compose"
+          else
+            COMPOSE_CMD="docker-compose"
+          fi
+          
           echo "Shutting down services..."
-          docker compose down -v
+          $COMPOSE_CMD down -v || echo "Cleanup completed with warnings"
           echo "✓ Cleanup complete"
