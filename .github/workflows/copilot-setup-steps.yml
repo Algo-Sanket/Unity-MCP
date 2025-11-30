@@ -1,4 +1,5 @@
 name: "Copilot Setup Steps"
+
 on:
   workflow_dispatch:
   push:
@@ -11,121 +12,23 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    timeout-minutes: 60
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
-      - name: Verify project structure
+
+      - name: Free up disk space (optional but recommended)
         run: |
-          echo "=== Verifying Unity MCP Project Structure ==="
-          
-          if [ ! -d "Unity-MCP-Plugin" ]; then
-            echo "✗ ERROR: Unity-MCP-Plugin directory not found!"
-            echo "Repository contents:"
-            ls -la
-            exit 1
-          fi
-          
-          echo "✓ Unity-MCP-Plugin found"
-          
-          if [ ! -f "Unity-MCP-Plugin/Assets/root/package.json" ]; then
-            echo "✗ ERROR: package.json not found!"
-            exit 1
-          fi
-          
-          echo "✓ Package configuration found"
-          echo ""
-          cat Unity-MCP-Plugin/Assets/root/package.json | grep -E '"name"|"version"|"displayName"'
-      
-      - name: Setup MCP Server environment
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf "/usr/local/share/boost"
+          echo "Disk space freed"
+
+      - name: Create docker-compose.yml
         run: |
-          echo "=== Setting up .NET environment ==="
-          
-          # Install .NET 9.0 SDK
-          wget https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/packages-microsoft-prod.deb
-          sudo dpkg -i packages-microsoft-prod.deb
-          sudo apt-get update
-          sudo apt-get install -y dotnet-sdk-9.0
-          
-          # Verify installation
-          dotnet --version
-          dotnet --list-sdks
-          
-          echo "✓ .NET 9.0 SDK installed"
-      
-      - name: Build MCP Server
-        timeout-minutes: 15
-        run: |
-          echo "=== Building MCP Server ==="
-          
-          cd Unity-MCP-Server
-          
-          echo "Step 1: Restoring dependencies..."
-          dotnet restore --timeout 120
-          
-          echo ""
-          echo "Step 2: Building Release configuration..."
-          dotnet build -c Release --timeout 120
-          
-          if [ $? -eq 0 ]; then
-            echo "✓ MCP Server build successful"
-          else
-            echo "✗ MCP Server build failed"
-            exit 1
-          fi
-      
-      - name: Build MCP Server for all platforms
-        timeout-minutes: 20
-        run: |
-          echo "=== Building MCP Server for all platforms ==="
-          
-          cd Unity-MCP-Server
-          
-          if [ -f "build-all.sh" ]; then
-            chmod +x build-all.sh
-            echo "Running multi-platform build..."
-            ./build-all.sh Release
-            
-            if [ $? -eq 0 ]; then
-              echo "✓ Multi-platform build successful"
-              
-              echo ""
-              echo "=== Build Output ==="
-              find publish -type f -executable 2>/dev/null | head -20
-            else
-              echo "✗ Multi-platform build failed"
-              exit 1
-            fi
-          else
-            echo "⚠ build-all.sh not found, skipping multi-platform build"
-          fi
-      
-      - name: Setup Docker
-        run: |
-          echo "=== Verifying Docker setup ==="
-          
-          docker --version
-          
-          if docker compose version &>/dev/null; then
-            echo "✓ Docker Compose v2 available"
-            docker compose version
-          elif command -v docker-compose &>/dev/null; then
-            echo "✓ Docker Compose v1 available"
-            docker-compose version
-          else
-            echo "✗ Docker Compose not found"
-            exit 1
-          fi
-      
-      - name: Create docker-compose configuration
-        run: |
-          echo "=== Creating docker-compose.yml ==="
-          
           cat > docker-compose.yml << 'EOF'
           version: '3.8'
-          
+
           services:
             unity-mcp-server:
               image: ivanmurzakdev/unity-mcp-server:latest
@@ -141,323 +44,159 @@ jobs:
                 test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
                 interval: 10s
                 timeout: 5s
-                retries: 5
-              restart: unless-stopped
-            
+                retries: 10
+                start_period: 10s
+
             unity-editor:
-              image: unityci/editor:ubuntu-6000.0.12f1-base-3
+              image: unityci/editor:ubuntu-6000.0.12f1-base-3   # 2024 LTS – no serial bugs!
               container_name: unity-editor
               ports:
                 - "7777:7777"
-              shm_size: 2g
+              shm_size: 4g
               networks:
                 - unity-network
               volumes:
                 - ./Unity-MCP-Plugin:/project
                 - unity-logs:/project/Logs
+              environment:
+                UNITY_EMAIL: ${UNITY_EMAIL}
+                UNITY_PASSWORD: ${UNITY_PASSWORD}
               entrypoint: ["/bin/bash", "-c"]
               command:
                 - |
                   set -e
-                  echo "=== Unity Container Starting ==="
-                  
-                  # Create necessary directories
-                  mkdir -p /root/.local/share/unity3d/Unity
-                  mkdir -p /project/Logs
-                  chmod 777 /project/Logs
-                  
-                  # Check if license file will be provided
-                  if [ -f /root/.local/share/unity3d/Unity/Unity_lic.ulf ]; then
-                    echo "✓ License file found"
-                  else
-                    echo "⚠ No license file provided"
-                    echo "IMPORTANT: Unity Personal License requires license file"
-                    echo "To use this container, provide license file at:"
-                    echo "  /root/.local/share/unity3d/Unity/Unity_lic.ulf"
-                  fi
-                  
-                  # Wait for project files to be available
-                  echo "Waiting for project files..."
-                  TIMEOUT=60
-                  ELAPSED=0
-                  while [ ! -d /project/Assets ] && [ $ELAPSED -lt $TIMEOUT ]; do
-                    echo "  Waiting... ($ELAPSED/$TIMEOUT)"
-                    sleep 2
-                    ELAPSED=$((ELAPSED + 2))
-                  done
-                  
-                  if [ ! -d /project/Assets ]; then
-                    echo "⚠ Project Assets not found, creating minimal structure..."
-                    mkdir -p /project/Assets /project/ProjectSettings
-                  fi
-                  
-                  # Start Unity Editor
-                  echo "Starting Unity Editor..."
+
+                  echo "=== Unity Personal License Activation (2025 method) ==="
+
+                  # Step 1: Return any old license
+                  echo "Returning any existing license..."
+                  /opt/unity/Editor/Unity -batchmode -nographics -quit -returnlicense -logFile /tmp/return.log || true
+
+                  # Step 2: Login → Unity auto-grants Personal license (this is the magic)
+                  echo "Logging in and activating Personal license..."
                   /opt/unity/Editor/Unity \
+                    -batchmode \
+                    -nographics \
+                    -quit \
+                    -username "${UNITY_EMAIL}" \
+                    -password "${UNITY_PASSWORD}" \
+                    -logFile /tmp/license.log
+
+                  echo "Personal license activated!"
+
+                  # Step 3: Ensure project & logs exist
+                  mkdir -p /project/{Assets,ProjectSettings,Logs}
+                  chmod 777 /project/Logs
+
+                  # Step 4: Start Unity with MCP plugin
+                  echo "Starting Unity Editor with MCP server on port 7777..."
+                  exec /opt/unity/Editor/Unity \
                     -projectPath /project \
                     -batchmode \
                     -nographics \
-                    -buildTarget StandaloneLinux64 \
                     -executeMethod com.IvanMurzak.Unity.MCP.Editor.Startup.Init \
-                    -logFile /project/Logs/unity.log \
-                    2>&1 &
-                  
-                  UNITY_PID=$!
-                  echo "Unity started with PID: $UNITY_PID"
-                  
-                  # Keep container alive while monitoring Unity
-                  while kill -0 $UNITY_PID 2>/dev/null; do
-                    sleep 10
-                  done
-                  
-                  echo "Unity process ended"
+                    -logFile /project/Logs/unity.log
+
               healthcheck:
                 test: ["CMD", "pgrep", "-f", "Unity"]
-                interval: 10s
-                timeout: 5s
-                retries: 3
-                start_period: 60s
-              restart: unless-stopped
-          
+                interval: 15s
+                timeout: 10s
+                retries: 5
+                start_period: 120s
+
           volumes:
             unity-logs:
-          
+
           networks:
             unity-network:
               driver: bridge
           EOF
-          
-          echo "✓ docker-compose.yml created successfully"
-      
-      - name: Start MCP Server
-        timeout-minutes: 5
+
+          echo "docker-compose.yml created successfully"
+
+      - name: Validate Unity credentials
+        env:
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
         run: |
-          echo "=== Starting MCP Server ==="
-          
-          if docker compose version &>/dev/null; then
-            COMPOSE_CMD="docker compose"
-          else
-            COMPOSE_CMD="docker-compose"
-          fi
-          
-          # Start only MCP server
-          $COMPOSE_CMD up -d unity-mcp-server
-          
-          echo "✓ MCP Server container started"
-          echo ""
-          $COMPOSE_CMD ps
-      
-      - name: Wait for MCP Server readiness
-        timeout-minutes: 5
-        run: |
-          echo "=== Waiting for MCP Server to be ready ==="
-          
-          TIMEOUT=60
-          ELAPSED=0
-          
-          while [ $ELAPSED -lt $TIMEOUT ]; do
-            if curl -f http://localhost:8080/health 2>/dev/null; then
-              echo "✓ MCP Server is ready!"
-              
-              # Get server info
-              echo ""
-              echo "MCP Server Status:"
-              curl -s http://localhost:8080/health | head -20
-              break
-            fi
-            
-            echo "Waiting... ($ELAPSED/$TIMEOUT seconds)"
-            sleep 5
-            ELAPSED=$((ELAPSED + 5))
-          done
-          
-          if [ $ELAPSED -ge $TIMEOUT ]; then
-            echo "✗ MCP Server failed to start within timeout"
-            
-            if docker compose version &>/dev/null; then
-              docker compose logs unity-mcp-server
-            else
-              docker-compose logs unity-mcp-server
-            fi
-            
+          if [[ -z "$UNITY_EMAIL" || -z "$UNITY_PASSWORD" ]]; then
+            echo "ERROR: UNITY_EMAIL or UNITY_PASSWORD secrets missing!"
+            echo "   → Go to repo Settings → Secrets and variables → Actions"
+            echo "   → Add UNITY_EMAIL and UNITY_PASSWORD"
             exit 1
           fi
-      
-      - name: Start Unity Editor (without credentials)
-        timeout-minutes: 5
+          echo "Unity credentials are present"
+
+      - name: Start services
+        env:
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
         run: |
-          echo "=== Starting Unity Editor Container ==="
-          
-          if docker compose version &>/dev/null; then
-            COMPOSE_CMD="docker compose"
-          else
-            COMPOSE_CMD="docker-compose"
-          fi
-          
-          # Start Unity editor container
-          $COMPOSE_CMD up -d unity-editor
-          
-          echo "✓ Unity Editor container started"
-          echo ""
-          $COMPOSE_CMD ps
-      
-      - name: Wait for Unity initialization
-        timeout-minutes: 10
+          docker compose up -d
+          echo "Services started"
+          docker compose ps
+
+      - name: Wait for MCP Server (port 8080)
         run: |
-          echo "=== Waiting for Unity to initialize ==="
-          
-          TIMEOUT=300
-          ELAPSED=0
-          
-          while [ $ELAPSED -lt $TIMEOUT ]; do
-            # Check if Unity process is running
-            if docker exec unity-editor pgrep -f "Unity" > /dev/null 2>&1; then
-              echo "✓ Unity process is running"
-              
-              # Check log file for progress
-              if docker exec unity-editor test -f /project/Logs/unity.log 2>/dev/null; then
-                SIZE=$(docker exec unity-editor stat -c%s /project/Logs/unity.log 2>/dev/null || echo "0")
-                
-                if [ $SIZE -gt 100 ]; then
-                  # Show last few lines periodically
-                  if [ $((ELAPSED % 30)) -eq 0 ]; then
-                    echo ""
-                    echo "Recent log output:"
-                    docker exec unity-editor tail -5 /project/Logs/unity.log 2>/dev/null
-                  fi
-                fi
-              fi
-            else
-              echo "⚠ Unity process not yet running ($ELAPSED/$TIMEOUT)"
+          echo "Waiting for MCP Server to be healthy..."
+          for i in {1..30}; do
+            if curl -f http://localhost:8080/health >/dev/null 2>&1; then
+              echo "MCP Server is ready!"
+              break
             fi
-            
-            sleep 10
-            ELAPSED=$((ELAPSED + 10))
+            echo "Attempt $i/30..."
+            sleep 5
           done
-          
-          echo ""
-          echo "✓ Unity initialization wait completed"
-      
-      - name: Verify all services
+          curl http://localhost:8080/health || (docker compose logs unity-mcp-server && exit 1)
+
+      - name: Wait for Unity Editor to start
         run: |
-          echo "=== Verifying Services Status ==="
+          echo "Waiting for Unity Editor process..."
+          timeout=300
+          elapsed=0
+          while [ $elapsed -lt $timeout ]; do
+            if docker exec unity-editor pgrep -f Unity >/dev/null 2>&1; then
+              echo "Unity Editor is running!"
+              break
+            fi
+            sleep 5
+            elapsed=$((elapsed+5))
+            echo "Waiting... ($elapsed/$timeout)"
+          done
+
+          echo "Final container status:"
+          docker compose ps
+
+      - name: Final status & success message
+        run: |
           echo ""
-          
-          if docker compose version &>/dev/null; then
-            COMPOSE_CMD="docker compose"
-          else
-            COMPOSE_CMD="docker-compose"
-          fi
-          
-          echo "Running containers:"
-          $COMPOSE_CMD ps
-          
+          echo "╔══════════════════════════════════════════╗"
+          echo "║       COPILOT + UNITY ENVIRONMENT READY!       ║"
+          echo "║                                                  ║"
+          echo "║  Unity Editor → http://localhost:7777          ║"
+          echo "║  MCP Server   → http://localhost:8080          ║"
+          echo "║                                                  ║"
+          echo "║  GitHub Copilot can now edit your Unity project ║"
+          echo "╚══════════════════════════════════════════╝"
           echo ""
-          echo "=== MCP Server Health ==="
-          if curl -f http://localhost:8080/health 2>/dev/null; then
-            echo "✓ MCP Server: HEALTHY"
-          else
-            echo "✗ MCP Server: UNHEALTHY"
-          fi
-          
-          echo ""
-          echo "=== Unity Editor Status ==="
-          if docker exec unity-editor pgrep -f "Unity" > /dev/null 2>&1; then
-            echo "✓ Unity: RUNNING"
-          else
-            echo "⚠ Unity: NOT RUNNING"
-          fi
-          
-          echo ""
-          echo "=== Network Configuration ==="
-          docker network inspect unity-network 2>/dev/null | grep -A 5 "Containers" || echo "Network not found"
-      
-      - name: Show service logs
+          docker compose ps
+
+      # ——————————————————————————
+      # Add your Copilot steps below — Unity stays alive!
+      # ——————————————————————————
+
+      - name: Example – Test MCP connection
+        run: |
+          curl -X POST http://localhost:8080/v1/messages \
+            -H "Content-Type: application/json" \
+            -d '{"messages":[{"role":"user","content":"Say hello from GitHub Actions!"}]}' \
+            -s | jq .
+
+      # Add as many steps as you want here!
+
+      - name: Cleanup
         if: always()
         run: |
-          echo "=== Service Logs ==="
-          
-          if docker compose version &>/dev/null; then
-            COMPOSE_CMD="docker compose"
-          else
-            COMPOSE_CMD="docker-compose"
-          fi
-          
-          echo ""
-          echo "--- MCP Server Logs (last 30 lines) ---"
-          $COMPOSE_CMD logs unity-mcp-server 2>/dev/null | tail -30
-          
-          echo ""
-          echo "--- Unity Editor Logs ---"
-          if [ -f "Unity-MCP-Plugin/Logs/unity.log" ]; then
-            echo "Last 50 lines from unity.log:"
-            tail -50 Unity-MCP-Plugin/Logs/unity.log
-          else
-            echo "unity.log not found locally, checking container..."
-            docker exec unity-editor tail -50 /project/Logs/unity.log 2>/dev/null || echo "No log available"
-          fi
-      
-      - name: Environment Ready - GitHub Copilot
-        run: |
-          echo ""
-          echo "╔═══════════════════════════════════════════════════════╗"
-          echo "║                                                       ║"
-          echo "║  ✓ UNITY MCP ENVIRONMENT READY FOR GITHUB COPILOT ✓  ║"
-          echo "║                                                       ║"
-          echo "╚═══════════════════════════════════════════════════════╝"
-          echo ""
-          echo "Available Services:"
-          echo "  🎮 Unity Editor:     localhost:7777"
-          echo "  🔌 MCP Server:       localhost:8080"
-          echo "  🌐 MCP Health:       http://localhost:8080/health"
-          echo ""
-          echo "Containers remain active for additional steps!"
-          echo "GitHub Copilot can now interact with Unity via MCP Protocol."
-          echo ""
-      
-      # ============================================
-      # CUSTOM COPILOT STEPS - ADD BELOW
-      # Services stay active throughout!
-      # ============================================
-      
-      - name: Test MCP Server connectivity
-        run: |
-          echo "=== Testing MCP Server ==="
-          
-          echo "Endpoint: http://localhost:8080"
-          curl -v http://localhost:8080/health 2>&1 | grep -E "HTTP|Connected"
-          
-          echo "✓ MCP Server is accessible"
-      
-      - name: Test Unity Editor connectivity
-        run: |
-          echo "=== Testing Unity Editor ==="
-          
-          if docker exec unity-editor pgrep -f "Unity" > /dev/null 2>&1; then
-            echo "✓ Unity process is running"
-            
-            # List open ports
-            docker exec unity-editor netstat -tuln 2>/dev/null | grep LISTEN || echo "netstat not available"
-          else
-            echo "⚠ Unity process not running"
-          fi
-      
-      # Add your custom Copilot steps here
-      # Both MCP Server and Unity remain active
-      
-      - name: Cleanup (always runs)
-        if: always()
-        timeout-minutes: 5
-        run: |
-          echo "=== Cleaning up ==="
-          
-          if docker compose version &>/dev/null; then
-            COMPOSE_CMD="docker compose"
-          else
-            COMPOSE_CMD="docker-compose"
-          fi
-          
-          echo "Stopping containers..."
-          $COMPOSE_CMD down -v 2>/dev/null || true
-          
-          echo "✓ Cleanup completed"
+          echo "Shutting down containers..."
+          docker compose down -v || true
+          echo "Cleanup complete"
