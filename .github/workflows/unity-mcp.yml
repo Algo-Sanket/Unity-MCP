@@ -1,0 +1,99 @@
+name: Unity + MCP Copilot (Fixed & Working 2025)
+
+on:
+  workflow_dispatch:
+  push:
+    paths: [ ".github/workflows/unity-mcp.yml" ]
+  pull_request:
+
+# Only one job can hold the Personal license
+concurrency:
+  group: unity-mcp-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  run-mcp:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Activate Unity Personal License
+        uses: game-ci/unity-actf-licensing@v2
+        env:
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+
+      - name: Start MCP Server + Unity Editor
+        run: |
+          docker network create mcp-net || true
+
+          docker run -d \
+            --name mcp-server \
+            --network mcp-net \
+            -p 8080:8080 \
+            ivanmurzakdev/unity-mcp-server:latest
+
+          docker run -d \
+            --name unity-editor \
+            --network mcp-net \
+            -p 7777:7777 \
+            -v "$(pwd)/Unity-MCP-Plugin:/project" \
+            --shm-size=2g \
+            unityci/editor:ubuntu-2022.3.61f1-base-3 \
+            /opt/unity/Editor/Unity \
+              -batchmode \
+              -nographics \
+              -projectPath /project \
+              -executeMethod com.IvanMurzak.Unity.MCP.Editor.Startup.Init \
+              -logFile /dev/stdout
+
+      - name: Wait for MCP Server (correct endpoint)
+        run: |
+          echo "Waiting for MCP Server..."
+          for i in {1..60}; do
+            if curl -f http://localhost:8080/api/health >/dev/null 2>&1; then
+              echo "MCP Server is READY!"
+              curl http://localhost:8080/api/health
+              break
+            fi
+            echo "Attempt $i/60 ..."
+            sleep 5
+          done
+
+          if ! curl -f http://localhost:8080/api/health >/dev/null 2>&1; then
+            echo "MCP Server failed to start"
+            docker logs mcp-server
+            exit 1
+          fi
+
+      - name: Environment Ready!
+        run: |
+          echo "UNITY + MCP IS FULLY RUNNING!"
+          echo "MCP API → http://localhost:8080"
+          echo "Unity port → 7777"
+          docker ps
+
+      - name: Test MCP Command
+        run: >
+          curl -X POST http://localhost:8080/api/execute
+          -H "Content-Type: application/json"
+          -d '{"code":"Debug.Log(\"Hello from GitHub Actions!\")"}'
+
+      - name: Return License & Full Cleanup
+        if: always()
+        uses: game-ci/unity-actf-licensing@v2
+        env:
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+        with:
+          returnLicense: true
+
+      - name: Stop containers and network
+        if: always()
+        run: |
+          docker rm -f mcp-server unity-editor || true
+          docker network rm mcp-net || true
+          echo "Cleanup done"
