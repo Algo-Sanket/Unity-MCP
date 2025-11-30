@@ -79,8 +79,26 @@ jobs:
                   # Create license directory
                   mkdir -p /root/.local/share/unity3d/Unity
                   
-                  # Activate Unity license with proper parameters
+                  # First, try to request a personal license
+                  echo "Requesting Unity Personal license..."
+                  /opt/unity/Editor/Unity \
+                    -batchmode \
+                    -nographics \
+                    -quit \
+                    -returnlicense \
+                    -logFile /tmp/return-license.log || true
+                  
+                  sleep 2
+                  
+                  # Now activate with credentials and request personal license
                   echo "Activating Unity license..."
+                  /opt/unity/Editor/Unity \
+                    -batchmode \
+                    -nographics \
+                    -createManualActivationFile \
+                    -logFile /tmp/activation-request.log || true
+                  
+                  # Try standard activation
                   /opt/unity/Editor/Unity \
                     -batchmode \
                     -nographics \
@@ -91,23 +109,29 @@ jobs:
                   
                   # Wait longer for activation to complete
                   echo "Waiting for license activation..."
-                  sleep 10
+                  sleep 15
                   
                   # Check license activation with better logging
                   if [ -f /root/.local/share/unity3d/Unity/Unity_lic.ulf ]; then
                     echo "✓ License activated successfully!"
                     echo "License file info:"
                     ls -lh /root/.local/share/unity3d/Unity/Unity_lic.ulf
+                    echo ""
+                    echo "License preview:"
+                    head -20 /root/.local/share/unity3d/Unity/Unity_lic.ulf
                   else
                     echo "✗ License activation failed!"
                     echo ""
                     echo "=== Activation Log ==="
                     cat /tmp/activation.log 2>/dev/null || echo "No activation log"
                     echo ""
+                    echo "=== Activation Request Log ==="
+                    cat /tmp/activation-request.log 2>/dev/null || echo "No request log"
+                    echo ""
                     echo "=== License Directory Contents ==="
                     ls -la /root/.local/share/unity3d/Unity/ 2>/dev/null || echo "Directory doesn't exist"
                     echo ""
-                    echo "Attempting to continue anyway - Unity might activate on first run..."
+                    echo "Attempting to continue - Unity will try to activate on project open..."
                   fi
                   
                   # Wait for project files
@@ -129,14 +153,15 @@ jobs:
                   mkdir -p /project/Logs
                   chmod 777 /project/Logs
                   
-                  # Start Unity Editor - this will also attempt activation if needed
-                  echo "Starting Unity Editor..."
+                  # Start Unity Editor - Unity will attempt to get a license when opening a project
+                  echo "Starting Unity Editor (Unity will auto-request license)..."
                   /opt/unity/Editor/Unity \
                     -projectPath /project \
                     -batchmode \
                     -nographics \
                     -username "${UNITY_EMAIL}" \
                     -password "${UNITY_PASSWORD}" \
+                    -buildTarget StandaloneLinux64 \
                     -executeMethod com.IvanMurzak.Unity.MCP.Editor.Startup.Init \
                     -logFile /project/Logs/unity.log \
                     2>&1 | tee /project/Logs/unity-stdout.log &
@@ -171,6 +196,7 @@ jobs:
                         -nographics \
                         -username "${UNITY_EMAIL}" \
                         -password "${UNITY_PASSWORD}" \
+                        -buildTarget StandaloneLinux64 \
                         -executeMethod com.IvanMurzak.Unity.MCP.Editor.Startup.Init \
                         -logFile /project/Logs/unity.log \
                         2>&1 | tee /project/Logs/unity-stdout.log &
@@ -209,6 +235,37 @@ jobs:
             exit 1
           fi
       
+      - name: Verify Unity credentials
+        env:
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+        run: |
+          echo "Checking Unity credentials..."
+          
+          if [ -z "$UNITY_EMAIL" ] || [ -z "$UNITY_PASSWORD" ]; then
+            echo "✗ UNITY_EMAIL or UNITY_PASSWORD not set!"
+            exit 1
+          fi
+          
+          echo "✓ UNITY_EMAIL is set: ${UNITY_EMAIL}"
+          echo "✓ UNITY_PASSWORD is set: [HIDDEN]"
+          echo ""
+          echo "⚠ IMPORTANT CHECKLIST:"
+          echo "  1. Is this the correct Unity account email?"
+          echo "  2. Is Two-Factor Authentication (2FA) DISABLED on this account?"
+          echo "  3. Does this account have a valid Unity Personal/Plus/Pro license?"
+          echo "  4. Is the password correct? (No typos, special chars escaped properly)"
+          echo ""
+          echo "Unity Personal License Notes:"
+          echo "  - Personal licenses may require manual acceptance in Unity Hub first"
+          echo "  - If activation fails, you may need to use the license file method"
+          echo "  - Unity will attempt to auto-request a license when opening the project"
+          echo ""
+          echo "Unity login failures (HTTP 401) are usually caused by:"
+          echo "  - 2FA being enabled (MUST be disabled for automation)"
+          echo "  - Incorrect password"
+          echo "  - Account locked or suspended"
+      
       - name: Start services with docker-compose
         env:
           UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
@@ -244,6 +301,13 @@ jobs:
       
       - name: Wait for MCP Server
         run: |
+          # Determine which docker compose command to use
+          if docker compose version &>/dev/null; then
+            COMPOSE_CMD="docker compose"
+          else
+            COMPOSE_CMD="docker-compose"
+          fi
+          
           echo "Waiting for MCP Server to be ready..."
           TIMEOUT=60
           ELAPSED=0
@@ -260,7 +324,7 @@ jobs:
           
           if [ $ELAPSED -ge $TIMEOUT ]; then
             echo "✗ MCP Server failed to start"
-            docker-compose logs unity-mcp-server
+            $COMPOSE_CMD logs unity-mcp-server
             exit 1
           fi
       
